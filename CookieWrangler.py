@@ -1,23 +1,5 @@
 #!/usr/bin/env python
 
-"""
-Export all cookies and local storage from Firefox:
-
-python script.py --firefox --output exported.json --local-storage
-
-Optionally, if you want to specify a particular Firefox profile directory:
-
-python script.py --firefox --output exported.json --local-storage --profile-dir "C:\Users\[USER]\AppData\Roaming\Mozilla\Firefox\Profiles\[PROFILE-NAME].default-release"
-
-Import all cookies and local storage from one JSON file:
-
-python script.py --import-all imported.json
-
-Optionally, if you want to specify a particular Firefox profile directory:
-
-python script.py --import-all imported.json --profile-dir "C:\Users\[USER]\AppData\Roaming\Mozilla\Firefox\Profiles\[PROFILE-NAME].default-release"
-"""
-
 import argparse
 import sqlite3
 import json
