@@ -240,6 +240,56 @@ def get_chrome_local_storage():
         kill_chrome()
 
 # ----- Firefox Cookies and Local Storage Functions -----
+def get_firefox_local_storage(profile_dir=None):
+    """
+    Returns local storage data from Firefox's per-site storage databases.
+    For each site folder in <profile_dir>/storage/default, this function looks for the
+    ls/data.sqlite file and reads the key/value pairs from its "data" table.
+    It returns a dictionary mapping origins (e.g. "https://example.com") to another
+    dictionary of local storage key/value pairs.
+    """
+    # Auto-detect the profile directory if not provided.
+    if profile_dir is None:
+        if os.name == 'posix':
+            base = os.path.expanduser('~/.mozilla/firefox')
+        else:
+            base = os.path.expandvars(r'%APPDATA%\Mozilla\Firefox\Profiles')
+        profiles = glob(os.path.join(base, '*default-release*'))
+        if not profiles:
+            profiles = glob(os.path.join(base, '*default*'))
+        if not profiles:
+            raise FileNotFoundError("Firefox profile not found")
+        profile_dir = profiles[0]
+
+    storage_dir = os.path.join(profile_dir, "storage", "default")
+    ls_data = {}
+
+    # Iterate over each site folder in the storage/default directory.
+    for site_folder in glob(os.path.join(storage_dir, "*")):
+        ls_db = os.path.join(site_folder, "ls", "data.sqlite")
+        if os.path.exists(ls_db):
+            # Convert the folder name to an origin string.
+            # E.g., "https+++example.com" becomes "https://example.com"
+            origin = os.path.basename(site_folder).replace("+++", "://")
+            site_storage = {}
+            try:
+                conn = sqlite3.connect(ls_db)
+                cur = conn.cursor()
+                cur.execute("SELECT key, value FROM data")
+                rows = cur.fetchall()
+                for key, value in rows:
+                    # Attempt to decode the value if it is stored as a BLOB.
+                    if isinstance(value, bytes):
+                        try:
+                            value = value.decode("utf-8")
+                        except Exception:
+                            value = value.hex()
+                    site_storage[key] = value
+                conn.close()
+                ls_data[origin] = site_storage
+            except Exception as e:
+                print(f"Error reading local storage from {ls_db}: {e}")
+    return ls_data
 
 def export_firefox_local_storage(output_file, profile_dir=None):
     """
