@@ -100,143 +100,138 @@ def get_chrome_cookies():
                       stderr=subprocess.DEVNULL)
 
 def get_chrome_local_storage():
-    """Robust local storage retrieval with error handling"""
-    DEBUG_PORT = 9223
-    config = {
-        'bin': Path(os.getenv('PROGRAMFILES')) / 'Google/Chrome/Application/chrome.exe',
-        'user_data': Path(os.getenv('LOCALAPPDATA')) / 'Google/Chrome/User Data'
-    }
+    """Access Chrome's local storage using proper key parsing"""
+    import os
+    import json
+    import subprocess
+    from pathlib import Path
+    import base64
+    import re
 
-    def log(message):
-        print(f"[LS DEBUG] {message}")
+    def log(msg):
+        print(f"[Storage Debug] {msg}")
 
-    # Cleaner process termination
-    def kill_chrome():
-        subprocess.run(
-            ['taskkill', '/F', '/IM', 'chrome.exe', '/T'],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False
-        )
+    try:
+        import plyvel
+    except ImportError:
+        try:
+            log("Installing plyvel library...")
+            subprocess.check_call(['pip', 'install', 'plyvel'])
+            import plyvel
+        except:
+            print("You need to install plyvel manually, its a pain! Here's some scratch notes to do it:")
+            notes = """git clone https://github.com/microsoft/vcpkg.git
+cd vcpkg
+bootstrap-vcpkg.bat
 
-    kill_chrome()
-    time.sleep(2)
+$env:VCPKG_ROOT = "C:\\path\\to\\vcpkg"
+$env:PATH = "$env:VCPKG_ROOT;$env:PATH"
 
-    args = [
-        str(config['bin']),
-        '--start-maximized',
-        '--restore-last-session',
-        f'--remote-debugging-port={DEBUG_PORT}',
-        '--remote-allow-origins=*',
-        '--headless=new',
-        '--disable-site-isolation-trials',
-        f'--user-data-dir={config["user_data"]}'
-    ]
 
-    browser_proc = subprocess.Popen(
-        args,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=subprocess.CREATE_NO_WINDOW
-    )
+vcpkg install leveldb
+
+$env:INCLUDE = "C:\\Users\\[USER]\\Documents\\vcpkg\\installed\\x64-windows\\include"
+$env:LIB = "C:\\Users\\[USER]\\Documents\\vcpkg\\installed\\x64-windows\\lib"
+
+python -m pip install plyvel"""
+            print(notes)
+            sys.exit()
+
+    # Chrome paths
+    user_data_dir = os.path.expandvars(r'%LOCALAPPDATA%\Google\Chrome\User Data')
+    leveldb_path = os.path.join(user_data_dir, 'Default', 'Local Storage', 'leveldb')
+
+    if not os.path.exists(leveldb_path):
+        log(f"LevelDB path not found: {leveldb_path}")
+        return {}
 
     all_storage = {}
+
     try:
-        # Wait for full initialization
-        max_retries = 5
-        targets = []
-        for _ in range(max_retries):
-            try:
-                response = requests.get(f'http://localhost:{DEBUG_PORT}/json', timeout=15)
-                targets = response.json()
-                if any(t['type'] == 'page' for t in targets):
-                    break
-            except (requests.RequestException, json.JSONDecodeError):
-                time.sleep(2)
-        else:
-            raise RuntimeError("Failed to connect to Chrome debug port")
+        # Open the LevelDB database
+        db = plyvel.DB(leveldb_path, create_if_missing=False)
 
-        # Process all targets
-        for target in targets:
-            if not target['url'].startswith(('http', 'chrome')):
-                continue
-
+        # Helper function to decode and parse keys
+        def parse_key(raw_key):
             try:
-                ws = websocket.create_connection(target['webSocketDebuggerUrl'], timeout=15)
+                # Remove common prefixes
+                if raw_key.startswith(b'\x00\x01'):
+                    key_str = raw_key[2:].decode('utf-8')
+                elif raw_key.startswith(b'\x01'):
+                    key_str = raw_key[1:].decode('utf-8')
+                else:
+                    key_str = raw_key.decode('utf-8')
+
+                # For META and METAACCESS keys
+                if key_str.startswith(('META:', 'METAACCESS:', 'VERSION')):
+                    return 'unknown', key_str
+
+                # Split on null byte to separate domain and key
+                parts = key_str.split('\x00')
+                if len(parts) >= 2:
+                    domain = parts[0].lstrip('_')  # Remove leading underscore if present
+                    # Join remaining parts with null byte to preserve original key structure
+                    key = '\x00'.join(parts[1:])
+                    # Remove control characters from key while preserving structure
+                    key = re.sub('[\x00-\x08\x0B\x0C\x0E-\x1F]', '', key)
+                    return domain, key
+                else:
+                    return 'unknown', key_str
+            except:
+                return None, None
+
+        # Helper function to decode values
+        def decode_value(raw_value):
+            try:
+                # Try UTF-8 first
+                value = raw_value.decode('utf-8')
+                # Remove null bytes and control chars except newlines and spaces
+                value = re.sub('[\x00-\x08\x0B\x0C\x0E-\x1F]', '', value)
+                return value
+            except:
                 try:
-                    # Enable required domains
-                    ws.send(json.dumps({
-                        "id": 1,
-                        "method": "Storage.enable",
-                        "params": {}
-                    }))
-                    ws.send(json.dumps({
-                        "id": 2,
-                        "method": "DOMStorage.enable",
-                        "params": {}
-                    }))
+                    # Try UTF-16
+                    return raw_value.decode('utf-16')
+                except:
+                    # If all else fails, return base64
+                    return base64.b64encode(raw_value).decode('utf-8')
 
-                    # Get storage key
-                    frame_id = target.get('frameId')
-                    ws.send(json.dumps({
-                        "id": 3,
-                        "method": "Storage.getStorageKeyForFrame",
-                        "params": {"frameId": frame_id} if frame_id else {}
-                    }))
+        # Process all key-value pairs
+        for key, value in db.iterator():
+            try:
+                domain, storage_key = parse_key(key)
+                if not domain or not storage_key:
+                    continue
 
-                    # Process responses
-                    storage_key = None
-                    start_time = time.time()
-                    while time.time() - start_time < 10:
-                        response = json.loads(ws.recv())
+                decoded_value = decode_value(value)
+                if not decoded_value:
+                    continue
 
-                        if response.get('id') == 3:
-                            storage_key = response.get('result', {}).get('storageKey')
-                            break
+                # Store in our result dictionary
+                if domain not in all_storage:
+                    all_storage[domain] = {}
+                all_storage[domain][storage_key] = decoded_value
 
-                    if not storage_key:
-                        continue
-
-                    # Request storage items
-                    ws.send(json.dumps({
-                        "id": 4,
-                        "method": "Storage.getStorageItemsForStorageKey",
-                        "params": {
-                            "storageKey": storage_key,
-                            "storageType": "local_storage"
-                        }
-                    }))
-
-                    # Collect items safely
-                    storage_items = []
-                    while time.time() - start_time < 15:
-                        response = json.loads(ws.recv())
-                        if response.get('id') == 4:
-                            storage_items = response.get('result', {}).get('items', [])
-                            break
-
-                    # Store results
-                    if storage_items:
-                        parsed_url = urlparse(target['url'])
-                        origin = f"{parsed_url.scheme}://{parsed_url.netloc}"
-                        all_storage[origin] = {k: v for k, v in storage_items if len(k) == 2}
-
-                finally:
-                    ws.close()
+                log(f"Found key: {storage_key} for domain: {domain}")
 
             except Exception as e:
-                log(f"Target {target['url']} error: {str(e)}")
+                log(f"Error processing entry: {e}")
                 continue
 
-        return all_storage
+        db.close()
 
-    finally:
-        try:
-            browser_proc.terminate()
-            browser_proc.wait(timeout=10)
-        except Exception:
-            pass
-        kill_chrome()
+    except Exception as e:
+        log(f"Error accessing LevelDB: {e}")
+        return {}
+
+    # Clean up the domains by removing any remaining underscores
+    cleaned_storage = {}
+    for domain, values in all_storage.items():
+        clean_domain = domain.lstrip('_')
+        cleaned_storage[clean_domain] = values
+
+    log(f"Found data for {len(cleaned_storage)} domains")
+    return cleaned_storage
 
 # ----- Firefox Cookies and Local Storage Functions -----
 
@@ -787,9 +782,9 @@ def main():
         sys.exit(1)
 
     args = parser.parse_args()
-    if args.local_storage and args.chrome:
-        print("Sorry, local storage for chrome is broken! Please omit --local-storage")
-        sys.exit(1)
+#    if args.local_storage and args.chrome:
+#        print("Sorry, local storage for chrome is broken! Please omit --local-storage")
+#        sys.exit(1)
     global LINUX
     LINUX = args.linux
 
@@ -873,6 +868,7 @@ def main():
         }
 
         if not args.output:  # Human-friendly output to console
+            print("################# Chrome Cookies #############################")
             for cookie in cookies:
                 print(f"{cookie['name']}: {cookie['value']}")
                 print(f"  Domain: {cookie['domain']}")
@@ -881,10 +877,22 @@ def main():
                 print(f"  Secure: {cookie.get('secure', False)}")
                 print(f"  HTTP Only: {cookie.get('httpOnly', False)}")
                 print("-" * 50)
+
+            if args.local_storage:
+                print("\n################# Chrome Local Storage #############################")
+                for domain, items in local_storage.items():
+                    print(f"\nDomain: {domain}")
+                    print("-" * 50)
+                    for key, value in items.items():
+                        # Truncate very long values
+                        if len(str(value)) > 100:
+                            value = str(value)[:100] + "..."
+                        print(f"  {key}: {value}")
+                    print("-" * 50)
         else:  # JSON output matches original format
             result = {
                 "cookies": cookies,
-                "local_storage": get_chrome_local_storage() if args.local_storage else {}
+                "local_storage": local_storage if args.local_storage else {}
             }
             with open(args.output, 'w') as f:
                 json.dump(result, f, indent=4, default=str)
