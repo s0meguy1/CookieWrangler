@@ -14,8 +14,6 @@ A Python command-line tool that exports and imports cookies (and local storage) 
 
 - **Python 3.6+** recommended
 - For **Chrome cookie decryption** on Windows:
-  - `pywin32` (`pip install pywin32`)
-  - `pycryptodomex` (`pip install pycryptodomex`)
   - `requests and websocket-client` (`requests websocket-client`)
 - For Firefox, no extra pip dependencies are strictly required for basic SQLite access (uses built-in `sqlite3`), but the script depends on standard Python modules and `glob`.
 
@@ -33,7 +31,7 @@ A Python command-line tool that exports and imports cookies (and local storage) 
 2. (Optional) **Install** Python dependencies if you intend to work with Chrome cookies on Windows:
 
    ```bash
-   pip install pywin32 pycryptodomex
+   pip install requests websocket-client
    ```
 
 3. Make sure you have the necessary **read/write permissions** if you’re working with browser profile directories.
@@ -80,7 +78,6 @@ python script.py --import-all imported.json --profile-dir "C:\Users\[USER]\AppDa
 ```bash
 python script.py --chrome --output chrome_exported.json
 ```
-> **Note**: Chrome export requires `pywin32` and `pycryptodomex` installed. Currently, only tested on Windows.
 
 ### Additional Options
 
