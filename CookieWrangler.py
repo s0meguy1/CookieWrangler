@@ -18,7 +18,6 @@ import subprocess
 # ----- Chrome Cookies Functionality -----
 def get_chrome_cookies():
     """Retrieve Chrome cookies via DevTools Protocol (Verified Working Version)"""
-    # Got idea from https://github.com/thewh1teagle/chrome-privless-encryption
     DEBUG_PORT = 9222
     config = {
         'bin': Path(os.getenv('PROGRAMFILES')) / 'Google/Chrome/Application/chrome.exe',
@@ -240,6 +239,7 @@ def get_chrome_local_storage():
         kill_chrome()
 
 # ----- Firefox Cookies and Local Storage Functions -----
+
 def get_firefox_local_storage(profile_dir=None):
     """
     Returns local storage data from Firefox's per-site storage databases.
@@ -781,12 +781,15 @@ def main():
     parser.add_argument('--db', help="Path to the cookie database file (Chrome or Firefox)")
     parser.add_argument('--default-host', help="Default host/domain to use for cookies missing that field")
     parser.add_argument('--profile-dir', help="Custom Firefox profile directory")
+    parser.set_defaults(firefox=True)
     if len(sys.argv) == 1:
         print(usage_text)
         sys.exit(1)
 
     args = parser.parse_args()
-
+    if args.local_storage and args.chrome:
+        print("Sorry, local storage for chrome is broken! Please omit --local-storage")
+        sys.exit(1)
     global LINUX
     LINUX = args.linux
 
