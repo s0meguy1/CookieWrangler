@@ -1,151 +1,155 @@
 # CookieWrangler
 
-A Python command-line tool that exports and imports cookies (and local storage) from Chrome/Firefox. Includes support for exporting/importing Firefox local storage as well. Designed for Windows paths, but partially adaptable to Linux with the `--linux` flag.
+A Python command-line tool that exports and imports cookies and local storage from Chrome/Firefox. Supports full export/import functionality for both browsers on Windows, with partial Linux support via the `--linux` flag.
 
 ## Features
 
 - **Export cookies** from Chrome or Firefox into JSON
+- **Export local storage** from Chrome or Firefox
 - **Import cookies** into a Firefox profile from a JSON file
-- **Export local storage** from a Firefox profile
 - **Import local storage** into a Firefox profile
 - **Combined import** of cookies and local storage from a single JSON file
 
 ## Requirements
 
 - **Python 3.6+** recommended
-- For **Chrome cookie decryption** on Windows:
-  - `requests and websocket-client` (`requests websocket-client`)
-- For Firefox, no extra pip dependencies are strictly required for basic SQLite access (uses built-in `sqlite3`), but the script depends on standard Python modules and `glob`.
+- For **Chrome**:
+  - `requests` and `websocket-client` for cookie access
+  - `plyvel` for local storage access (requires LevelDB)
+- For Firefox, no extra dependencies required (uses built-in `sqlite3`)
 
-> **Note**: Some paths and features are Windows-specific; local storage for Chrome is not yet fully implemented.
+### Installing plyvel (for Chrome local storage)
 
-## Installation
+Chrome local storage requires `plyvel`, which needs LevelDB. Here's how to set it up on Windows:
 
-1. **Clone** this repository or **download** the script:
-
-   ```bash
-   git clone https://github.com/YourUsername/CookieWrangler.git
-   cd CookieWrangler
-   ```
-
-2. (Optional) **Install** Python dependencies if you intend to work with Chrome cookies on Windows:
-
-   ```bash
-   pip install requests websocket-client
-   ```
-
-3. Make sure you have the necessary **read/write permissions** if you’re working with browser profile directories.
-
-## Usage
-
-Run the script with `python script.py [options]`. Below are some common use cases.
-
-### 1. Export Firefox Cookies
-
+1. **Install vcpkg and LevelDB**:
 ```bash
-python script.py --firefox --output exported.json
+git clone https://github.com/microsoft/vcpkg.git
+cd vcpkg
+bootstrap-vcpkg.bat
+
+# Set environment variables
+$env:VCPKG_ROOT = "C:\path\to\vcpkg"
+$env:PATH = "$env:VCPKG_ROOT;$env:PATH"
+
+# Install LevelDB
+vcpkg install leveldb
+
+# Set include and lib paths
+$env:INCLUDE = "C:\Users\[USER]\Documents\vcpkg\installed\x64-windows\include"
+$env:LIB = "C:\Users\[USER]\Documents\vcpkg\installed\x64-windows\lib"
 ```
 
-By default, it attempts to find a Firefox profile in the standard user profile directory.
+2. **Install plyvel**:
+```bash
+python -m pip install plyvel
+```
 
-### 2. Export Firefox Cookies **and** Local Storage
+## Quick Start
 
+1. **Install dependencies**:
+```bash
+pip install requests websocket-client plyvel
+```
+
+2. **Basic usage**:
+
+Export Chrome data:
+```bash
+python script.py --chrome --output exported.json --local-storage
+```
+
+Export Firefox data:
 ```bash
 python script.py --firefox --output exported.json --local-storage
 ```
 
-### 3. Specify a Particular Firefox Profile
+## Detailed Usage
 
+### Export Chrome Data
 ```bash
+# Export both cookies and local storage
+python script.py --chrome --output chrome_exported.json --local-storage
+
+# Export only cookies
+python script.py --chrome --output chrome_exported.json
+```
+
+### Export Firefox Data
+```bash
+# Export both cookies and local storage
+python script.py --firefox --output firefox_exported.json --local-storage
+
+# Export with specific profile directory
 python script.py --firefox --output exported.json --local-storage \
  --profile-dir "C:\Users\[USER]\AppData\Roaming\Mozilla\Firefox\Profiles\[PROFILE-NAME].default-release"
 ```
 
-### 4. Import All (Cookies + Local Storage) from a Single JSON File
-
+### Import Data to Firefox
 ```bash
+# Import both cookies and local storage
 python script.py --import-all imported.json
-```
 
-Optionally specifying a Firefox profile:
-
-```bash
-python script.py --import-all imported.json --profile-dir "C:\Users\[USER]\AppData\Roaming\Mozilla\Firefox\Profiles\[PROFILE-NAME].default-release"
-```
-
-### 5. Export Chrome Cookies (Experimental)
-
-```bash
-python script.py --chrome --output chrome_exported.json
+# Import with specific profile
+python script.py --import-all imported.json \
+ --profile-dir "C:\Users\[USER]\AppData\Roaming\Mozilla\Firefox\Profiles\[PROFILE-NAME].default-release"
 ```
 
 ### Additional Options
 
-- `--db PATH`  
-  Use a specific cookie database file instead of auto-detecting.  
-- `--default-host HOSTNAME`  
-  Specify a default host for cookies that have no host set.  
-- `--linux`  
-  Tweak the internal logic to look for Linux-style Firefox profiles (e.g. `~/.mozilla/firefox`).
+- `--db PATH` - Specify cookie database location
+- `--default-host HOSTNAME` - Set default host for hostless cookies
+- `--linux` - Use Linux-style Firefox paths
+- `--profile-dir PATH` - Specify Firefox profile directory
 
-For **more advanced usage** details, see the `main()` function’s help text in `script.py` or run:
+## JSON Format
 
-```bash
-python script.py --help
-```
-
-## JSON Structure for Imports
-
-When you **import** cookies or local storage from JSON, the file should follow this structure:
+The tool uses this JSON structure for import/export:
 
 ```json
 {
   "cookies": [
     {
-      "name": "...",
-      "value": "...",
-      "host": "...",
-      "path": "...",
-      "expiry": "...",
-      ...
+      "name": "cookie_name",
+      "value": "cookie_value",
+      "host": "example.com",
+      "path": "/",
+      "expiry": 1234567890,
+      "isSecure": true,
+      "isHttpOnly": false
     }
   ],
   "local_storage": {
     "https://example.com": {
-      "myKey": "myValue",
-      "anotherKey": "anotherValue"
+      "key1": "value1",
+      "key2": "value2"
     },
-    "http://anotherdomain.com": {
-      "someKey": "someValue"
+    "chrome://settings": {
+      "setting1": "value1"
     }
   }
 }
 ```
 
-- `cookies` is a **list** of cookie objects.  
-- `local_storage` is a **dictionary** with origins (e.g., `"https://example.com"`) as keys, and a dictionary of key/value pairs as values.
+## Important Notes
 
-## Important Notes and Disclaimer
-
-- This script can **read** from and **write** to browser databases. **Always back up** important profiles or data before running import operations.
-- Local storage for **Chrome** is currently **not fully implemented**—Firefox local storage is the primary focus.
-- Keep in mind some **encryption and platform-specific** complexities, especially for Chrome cookies on non-Windows platforms.
-- Use responsibly: manipulating or sharing cookies can have **security and privacy** implications.
+- **Always backup** your browser profiles before importing data
+- Chrome local storage requires proper LevelDB/plyvel setup
+- Cookie manipulation has security implications - use responsibly
+- Some features may be Windows-specific
 
 ## Contributing
 
-Contributions or testing across different OSes and browsers are welcome! Feel free to:
+Contributions welcome! Please:
 
-1. **Fork** the repo
-2. Create a **branch** for your feature or fix
-3. Submit a **pull request**
+1. Fork the repository
+2. Create a feature branch
+3. Submit a pull request
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+MIT License - see LICENSE file for details.
 
 ---
 
-Have fun wrangling your cookies! 
-
-*Enjoy **CookieWrangler**? Give us a ⭐ on GitHub!*
+Found this useful? Give us a ⭐ on GitHub!
